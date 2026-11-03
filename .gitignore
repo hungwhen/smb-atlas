@@ -1,0 +1,17 @@
+# Local secrets and scan output
+.env
+.env.*
+!.env.example
+exports/
+*.log
+
+# Generated development files
+node_modules/
+coverage/
+.nyc_output/
+
+# Editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
