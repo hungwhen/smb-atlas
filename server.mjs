@@ -2,13 +2,12 @@ import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { parseTargets } from './lib/targets.mjs';
+import { createTargetPlan } from './lib/targets.mjs';
 import { ScanManager } from './lib/scanner.mjs';
 import { queryEntries, inventoryStats, fileExtension } from './lib/inventory.mjs';
 
 export { queryEntries } from './lib/inventory.mjs';
 
-const MAX_HOSTS = 4096;
 const MAX_BODY = 262144;
 const publicPath = fileURLToPath(new URL('./public/', import.meta.url));
 const assets = new Map([['/', ['index.html', 'text/html; charset=utf-8']],
@@ -36,7 +35,9 @@ async function readJson(req) {
 }
 
 export function validateScan(input) {
-  const hosts = parseTargets(input.targets, { maxHosts: MAX_HOSTS });
+  const hosts = createTargetPlan(input.targets);
+  // Validate the numeric progress counter without materializing the target addresses.
+  void hosts.length;
   if (typeof input.username !== 'string' || !input.username.trim() || input.username.length > 256) throw fail(400, 'A username of 1–256 characters is required.');
   if (typeof input.password !== 'string' || !input.password || input.password.length > 4096) throw fail(400, 'A password of 1–4096 characters is required.');
   if (input.domain !== undefined && (typeof input.domain !== 'string' || input.domain.length > 256)) throw fail(400, 'Domain must be text, up to 256 characters.');
@@ -100,15 +101,16 @@ export function createApp({ manager = new ScanManager(), platform = process.plat
       const path = url.pathname;
       if (path.startsWith('/api/')) {
         if (req.method === 'GET' && path === '/api/session') {
-          return json(200, { token, platform, version: '1.3.0', limits: { maxHosts: MAX_HOSTS }, activeJob: manager.snapshot() });
+          return json(200, { token, platform, version: '1.3.0', limits: { maxHosts: null }, activeJob: manager.snapshot() });
         }
         const provided = Buffer.from(String(req.headers['x-scanner-token'] || ''));
         const expected = Buffer.from(token);
         if (provided.length !== expected.length || !timingSafeEqual(provided, expected)) throw fail(403, 'App session expired. Reload this page.');
         if (req.method === 'POST' && path === '/api/targets') {
           const body = await readJson(req);
-          const hosts = parseTargets(body.targets, { maxHosts: MAX_HOSTS });
-          return json(200, { hostsCount: hosts.length, preview: hosts.slice(0, 12) });
+          const hosts = createTargetPlan(body.targets);
+          const hostsCount = hosts.count <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(hosts.count) : hosts.count.toString();
+          return json(200, { hostsCount, preview: hosts.preview() });
         }
         if (req.method === 'POST' && path === '/api/scans') {
           if (platform !== 'win32') throw fail(400, 'Real SMB scanning requires Windows. The UI demo works on any platform.');
@@ -130,12 +132,14 @@ export function createApp({ manager = new ScanManager(), platform = process.plat
           }
           if (req.method === 'GET') {
             const entries = queryEntries(manager.entries, url.searchParams);
-            const job = manager.snapshot();
+            const hostOffset = Math.max(0, Number.parseInt(url.searchParams.get('hostOffset') || '0', 10) || 0);
+            const hostLimit = Math.min(200, Math.max(1, Number.parseInt(url.searchParams.get('hostLimit') || '200', 10) || 200));
+            const job = manager.snapshot({ hostOffset, hostLimit });
             if (match[2] === 'export') {
               const format = url.searchParams.get('format') || 'csv';
               if (!['csv', 'json'].includes(format)) throw fail(400, 'Export format must be csv or json.');
               res.setHeader('Content-Disposition', `attachment; filename="smb-atlas-${job.id}.${format}"`);
-              if (format === 'json') return json(200, { job, total: entries.length, entries, stats: inventoryStats(entries) });
+              if (format === 'json') return json(200, { job: manager.snapshot({ hostLimit: Infinity }), total: entries.length, entries, stats: inventoryStats(entries) });
               res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8' });
               const fields = ['host', 'share', 'path', 'name', 'kind', 'size', 'modified', 'extension'];
               // UTF-8 BOM makes Windows Excel preserve non-ASCII filenames.

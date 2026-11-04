@@ -72,19 +72,67 @@ test('rejects DNS rebinding, cross-origin access and API calls without the sessi
   assert.equal((await request(server, '/api/scans/current', { headers: auth })).status, 200);
 });
 
-test('target preview rejects invalid or excessive targets and validates request encoding', async t => {
+test('target preview accepts uncapped subnets and rejects invalid syntax or encoding', async t => {
   const { server, auth } = await fixture(t);
   const preview = await request(server, '/api/targets', { method: 'POST', headers: auth,
     body: { targets: '192.0.2.0/30 2001:db8::1' } });
   assert.equal(preview.status, 200);
   assert.deepEqual(preview.json, { hostsCount: 3, preview: ['192.0.2.1', '192.0.2.2', '2001:db8::1'] });
-  for (const targets of ['192.0.2.1 & whoami', '\\\\192.0.2.1\\Docs', '0.0.0.0/0', '::/64', 'host.example']) {
+  for (const targets of ['192.0.2.1 & whoami', '\\\\192.0.2.1\\Docs', 'host.example']) {
     const response = await request(server, '/api/targets', { method: 'POST', headers: auth, body: { targets } });
     assert.equal(response.status, 400, targets);
+  }
+  for (const [targets, count] of [['10.0.0.0/13', 524286], ['0.0.0.0/0', 4294967294], ['::/64', '18446744073709551616']]) {
+    const response = await request(server, '/api/targets', { method: 'POST', headers: auth, body: { targets } });
+    assert.equal(response.status, 200);
+    assert.equal(response.json.hostsCount, count);
+    assert.equal(response.json.preview.length, 12);
   }
   assert.equal((await request(server, '/api/targets', { method: 'POST', headers: auth, rawBody: '{bad' })).status, 400);
   assert.equal((await request(server, '/api/targets', { method: 'POST', headers: auth, body: [] })).status, 400);
   assert.equal((await request(server, '/api/targets', { method: 'POST', headers: { ...auth, 'Content-Type': 'text/plain' }, body: {} })).status, 415);
+});
+
+test('large scans keep polling responses paginated and cancel queued targets without expanding them', async t => {
+  let calls = 0;
+  const { server, manager, auth } = await fixture(t, { runner: ({ signal, onState }) => new Promise(resolve => {
+    calls++;
+    onState('scanning');
+    signal.addEventListener('abort', () => resolve({ status: 'cancelled' }), { once: true });
+  }) });
+  const session = await request(server, '/api/session');
+  assert.equal(session.json.limits.maxHosts, null);
+  const started = await request(server, '/api/scans', { method: 'POST', headers: auth, body: payload({ targets: '10.0.0.0/13' }) });
+  assert.equal(started.status, 202);
+  assert.equal(started.json.job.targetsCount, 524286);
+  assert.equal(started.json.job.hosts.length, 200);
+  assert.equal(started.json.job.hostStatusCounts.scanning, 4);
+  assert.equal(started.json.job.hostStatusCounts.queued, 524282);
+  assert.ok(started.text.length < 50000);
+  const id = started.json.job.id;
+  const page = await request(server, `/api/scans/${id}?hostOffset=500000&hostLimit=100`, { headers: auth });
+  assert.equal(page.json.job.hostsOffset, 500000);
+  assert.equal(page.json.job.hostsTotal, 524286);
+  assert.equal(page.json.job.hosts.length, 100);
+  assert.equal(page.json.job.hosts[0].host, '10.7.161.33');
+  await request(server, `/api/scans/${id}/cancel`, { method: 'POST', headers: auth });
+  await manager.wait();
+  assert.equal(calls, 4);
+  const cancelled = await request(server, `/api/scans/${id}?hostOffset=524200`, { headers: auth });
+  assert.equal(cancelled.json.job.hosts.length, 86);
+  assert.equal(cancelled.json.job.hostStatusCounts.cancelled, 524286);
+  assert.equal(cancelled.json.job.completedHosts, 524286);
+  assert.equal(cancelled.json.job.hosts.every(host => host.status === 'cancelled'), true);
+});
+
+test('JSON exports retain all host outcomes beyond the displayed page', async t => {
+  const { server, manager, auth } = await fixture(t);
+  const started = await request(server, '/api/scans', { method: 'POST', headers: auth, body: payload({ targets: '10.0.0.0/23' }) });
+  await manager.wait();
+  const exported = await request(server, `/api/scans/${started.json.job.id}/export?format=json`, { headers: auth });
+  assert.equal(exported.status, 200);
+  assert.equal(exported.json.job.hosts.length, 510);
+  assert.equal(exported.json.job.hostStatusCounts.completed, 510);
 });
 
 test('scan validation handles domain credentials and rejects invalid options before launching', () => {

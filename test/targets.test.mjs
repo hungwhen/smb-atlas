@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseTargets, TargetValidationError } from '../lib/targets.mjs';
+import { createTargetPlan, parseTargets, TargetValidationError } from '../lib/targets.mjs';
 
 test('accepts mixed separators, BOM and comments; sorts and deduplicates IPs', () => {
   assert.deepEqual(parseTargets('\uFEFF192.0.2.9,192.0.2.1; 192.0.2.9\n# lab\n2001:DB8::A # note\n192.0.2.2'),
@@ -40,7 +40,7 @@ test('normalizes dotted and hexadecimal IPv4-mapped IPv6 aliases', () => {
 
 test('refuses huge and overlapping huge subnets before host enumeration', { timeout: 1000 }, () => {
   for (const input of ['0.0.0.0/0', '::/0', '::/0 ::/64', '192.0.2.1 0.0.0.0/0']) {
-    assert.throws(() => parseTargets(input), error => error instanceof TargetValidationError && /unique hosts; the limit is 4,096/.test(error.message));
+    assert.throws(() => parseTargets(input, { maxHosts: 4096 }), error => error instanceof TargetValidationError && /unique hosts; the limit is 4,096/.test(error.message));
   }
   assert.throws(() => parseTargets('192.0.2.1 192.0.2.2', { maxHosts: 1 }), /2 unique hosts/);
   assert.equal(parseTargets('192.0.2.1 192.0.2.1', { maxHosts: 1 }).length, 1);
@@ -57,8 +57,30 @@ test('rejects ambiguous addresses, non-IP inputs, URLs, UNC paths and command sy
   assert.throws(() => parseTargets(['192.0.2.1']), TargetValidationError);
 });
 
-test('validates limits rather than silently disabling the bound', () => {
+test('optional limits must be positive integers, with null meaning uncapped', () => {
   for (const maxHosts of [0, -1, 1.5, Infinity, NaN, '4096', Number.MAX_SAFE_INTEGER + 1]) {
     assert.throws(() => parseTargets('192.0.2.1', { maxHosts }), /maxHosts/);
   }
+  assert.equal(parseTargets('192.0.2.1', { maxHosts: null }).length, 1);
+});
+
+test('targets above the old cap are accepted by default and expanded only on demand', () => {
+  assert.equal(parseTargets('10.0.0.0/19').length, 8190);
+  const plan = createTargetPlan('10.0.0.0/13 10.0.0.0/19');
+  assert.equal(plan.count, 524286n);
+  assert.equal(plan.length, 524286);
+  assert.deepEqual(plan.preview(3), ['10.0.0.1', '10.0.0.2', '10.0.0.3']);
+  assert.equal(plan.at(500000), '10.7.161.33');
+  assert.equal(plan.at(-1), '10.7.255.254');
+  assert.equal(plan.at(plan.length), undefined);
+});
+
+test('very large IPv4 and IPv6 previews count ranges without expanding them', { timeout: 1000 }, () => {
+  const ipv4 = createTargetPlan('0.0.0.0/0');
+  assert.equal(ipv4.count, 4294967294n);
+  assert.deepEqual(ipv4.preview(2), ['0.0.0.1', '0.0.0.2']);
+  const ipv6 = createTargetPlan('::/0 ::/64');
+  assert.equal(ipv6.count, 1n << 128n);
+  assert.deepEqual(ipv6.preview(2), ['::', '::1']);
+  assert.throws(() => ipv6.length, /exact integer range/);
 });

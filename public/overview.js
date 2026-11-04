@@ -137,7 +137,9 @@
       { id: 'active', label: 'Active', color: '#6d849a', statuses: ['probing', 'scanning'] },
       { id: 'queued', label: 'Queued', color: '#c9cec9', statuses: ['queued'] },
       { id: 'cancelled', label: 'Stopped', color: '#8a8f8b', statuses: ['cancelled'] }
-    ].map((group) => ({ ...group, count: hosts.filter((host) => group.statuses.includes(host.status)).length }));
+    ].map((group) => ({ ...group, count: job.hostStatusCounts
+      ? group.statuses.reduce((sum, status) => sum + numeric(job.hostStatusCounts[status]), 0)
+      : hosts.filter((host) => group.statuses.includes(host.status)).length }));
     const identified = groups.reduce((sum, group) => sum + group.count, 0); const expected = Math.max(hosts.length, numeric(job.targetsCount));
     if (expected > identified) groups.push({ id: 'pending', label: 'Pending / other', color: '#e5e8e5', count: expected - identified });
     const total = groups.reduce((sum, group) => sum + group.count, 0);
