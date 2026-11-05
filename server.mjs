@@ -69,7 +69,7 @@ export function validateScan(input) {
   }
   const options = {
     maxDepth: number('maxDepth', 8, 0, 32), concurrency: number('concurrency', 4, 1, 16),
-    timeoutSeconds: number('timeoutSeconds', 90, 5, 600), maxEntries: number('maxEntries', 50000, 100, 250000),
+    timeoutSeconds: number('timeoutSeconds', 90, 5, 600),
     includeHiddenShares: boolean('includeHiddenShares'), includeFolders: boolean('includeFolders'),
     shareNames: [...new Set(shareNames)],
   };
@@ -101,7 +101,7 @@ export function createApp({ manager = new ScanManager(), platform = process.plat
       const path = url.pathname;
       if (path.startsWith('/api/')) {
         if (req.method === 'GET' && path === '/api/session') {
-          return json(200, { token, platform, version: '1.3.0', limits: { maxHosts: null }, activeJob: manager.snapshot() });
+          return json(200, { token, platform, version: '1.3.0', limits: { maxHosts: null, maxEntries: null }, activeJob: manager.snapshot() });
         }
         const provided = Buffer.from(String(req.headers['x-scanner-token'] || ''));
         const expected = Buffer.from(token);

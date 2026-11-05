@@ -103,7 +103,6 @@ test('Windows request validation rejects UNC injection and out-of-range producti
     { host: '192.0.2.1\\escape' },
     { options: { shareNames: ['share\\escape'] } },
     { options: { maxDepth: 33 } },
-    { options: { maxEntries: 99 } },
   ]) {
     const result = runPowerShell(['-File', workerPath], {
       input: JSON.stringify({ host: '192.0.2.1', ...syntheticCredentials, ...change }),
@@ -113,7 +112,7 @@ test('Windows request validation rejects UNC injection and out-of-range producti
   }
 });
 
-test('Windows local traversal adapter verifies metadata, depth limits, folder rows, and row caps', windowsOnly, () => {
+test('Windows local traversal adapter verifies metadata, depth limits, and folder rows', windowsOnly, () => {
   const fixture = mkdtempSync(join(tmpdir(), 'smb-atlas-worker-'));
   try {
     mkdirSync(join(fixture, 'nested'));
@@ -127,29 +126,24 @@ $functionNames = @('Get-SafeError', 'Write-WarningEvent', 'Invoke-ShareInventory
 ${extractFunctions}
 function Write-Event { param([hashtable]$Event) $script:testEvents.Add($Event) }
 $cases = @(
-    @{ depth = 0; folders = $false; limit = 100 },
-    @{ depth = 2; folders = $false; limit = 100 },
-    @{ depth = 2; folders = $true; limit = 100 },
-    @{ depth = 2; folders = $false; limit = 1 }
+    @{ depth = 0; folders = $false },
+    @{ depth = 2; folders = $false },
+    @{ depth = 2; folders = $true }
 )
 foreach ($case in $cases) {
     $script:hostName = '192.0.2.1'
-    $script:entryCount = 0
     $script:warningCount = 0
     $script:hadErrors = $false
-    $script:atLimit = $false
     $script:credentialFailed = $false
     $script:testEvents = New-Object 'System.Collections.Generic.List[hashtable]'
-    # The internal function permits a small cap for a compact fixture; the
-    # production JSON request validator requires at least 100 entries.
-    Invoke-ShareInventory -Share 'fixture' -UncHost $env:SMB_ATLAS_FIXTURE_DIR -MaxDepth $case.depth -IncludeFolders $case.folders -MaxEntries $case.limit
-    [Console]::Out.WriteLine((ConvertTo-Json -Depth 7 -Compress -InputObject @{ depth = $case.depth; folders = $case.folders; limit = $case.limit; events = @($script:testEvents.ToArray()) }))
+    Invoke-ShareInventory -Share 'fixture' -UncHost $env:SMB_ATLAS_FIXTURE_DIR -MaxDepth $case.depth -IncludeFolders $case.folders
+    [Console]::Out.WriteLine((ConvertTo-Json -Depth 7 -Compress -InputObject @{ depth = $case.depth; folders = $case.folders; events = @($script:testEvents.ToArray()) }))
 }
 `, { env: { SMB_ATLAS_FIXTURE_DIR: fixture } });
     assert.equal(result.status, 0);
     const cases = events(result);
-    assert.equal(cases.length, 4);
-    const expected = [[1, 'partial'], [2, 'complete'], [4, 'complete'], [1, 'partial']];
+    assert.equal(cases.length, 3);
+    const expected = [[1, 'partial'], [2, 'complete'], [4, 'complete']];
     for (const [index, record] of cases.entries()) {
       const rows = record.events.filter(event => event.type === 'entry').map(event => event.entry);
       assert.equal(rows.length, expected[index][0]);
@@ -169,6 +163,44 @@ foreach ($case in $cases) {
     assert.deepEqual(cases[1].events.filter(event => event.type === 'entry').map(event => event.entry.extension).sort(), ['.csv', '.txt']);
   } finally {
     // Remove only the owned, randomly named fixture directory.
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test('Windows legacy maxEntries option does not truncate a local inventory', windowsOnly, () => {
+  const fixture = mkdtempSync(join(tmpdir(), 'smb-atlas-worker-uncapped-'));
+  try {
+    for (let index = 0; index < 105; index++) {
+      writeFileSync(join(fixture, `entry-${index}.txt`), 'synthetic file');
+    }
+    const result = runScript(`
+$source = Get-Content -LiteralPath $env:SMB_ATLAS_WORKER_PATH -Raw
+$rootPattern = '(?m)^    \\$root = .*$'
+if ([regex]::Matches($source, $rootPattern).Count -ne 1) { throw 'The local-only root adapter could not be applied.' }
+# Keep production request parsing and traversal, replacing only the UNC root
+# in memory. The explicit share bypasses discovery; NEW_CREDENTIALS retains
+# the current local identity and does not authenticate to any remote host.
+$source = [regex]::Replace($source, $rootPattern, [Text.RegularExpressions.MatchEvaluator]{ param($match) '    $root = $env:SMB_ATLAS_FIXTURE_DIR' })
+& ([ScriptBlock]::Create($source))
+`, {
+      env: { SMB_ATLAS_FIXTURE_DIR: fixture },
+      input: JSON.stringify({
+        host: '192.0.2.1',
+        ...syntheticCredentials,
+        options: { shareNames: ['fixture'], maxEntries: 100 },
+      }),
+    });
+    assert.equal(result.status, 0);
+    const records = events(result);
+    const rows = records.filter(event => event.type === 'entry').map(event => event.entry);
+    assert.equal(rows.length, 105);
+    assert.equal(new Set(rows.map(row => row.name)).size, 105);
+    assert.ok(rows.every(row => row.path.startsWith(fixture)));
+    assert.equal(records.findLast(event => event.type === 'share').status, 'complete');
+    assert.equal(records.at(-1).status, 'complete');
+    assert.ok(!records.some(event => event.type === 'warning' || event.status === 'partial'));
+    for (const secret of Object.values(syntheticCredentials)) assert.ok(!result.stdout.includes(secret));
+  } finally {
     rmSync(fixture, { recursive: true, force: true });
   }
 });

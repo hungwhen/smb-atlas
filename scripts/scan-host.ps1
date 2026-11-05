@@ -13,10 +13,8 @@ $script:token = [IntPtr]::Zero
 $script:identity = $null
 $script:impersonation = $null
 $script:hostName = ''
-$script:entryCount = 0
 $script:warningCount = 0
 $script:hadErrors = $false
-$script:atLimit = $false
 $script:credentialFailed = $false
 $script:validationMessage = $null
 $password = $null
@@ -110,7 +108,7 @@ function Write-WarningEvent {
 }
 
 function Invoke-ShareInventory {
-    param([string]$Share, [string]$UncHost, [int]$MaxDepth, [bool]$IncludeFolders, [int]$MaxEntries)
+    param([string]$Share, [string]$UncHost, [int]$MaxDepth, [bool]$IncludeFolders)
     $shareHadError = $false
     $rootOpened = $false
     $root = '\\' + $UncHost + '\' + $Share
@@ -118,13 +116,13 @@ function Invoke-ShareInventory {
     $pending = New-Object 'System.Collections.Generic.Stack[object]'
     $pending.Push(@{ path = $root; depth = 0 })
 
-    while ($pending.Count -gt 0 -and -not $script:atLimit -and -not $script:credentialFailed) {
+    while ($pending.Count -gt 0 -and -not $script:credentialFailed) {
         $directory = $pending.Pop()
         $iterator = $null
         try {
             $directoryInfo = New-Object System.IO.DirectoryInfo([string]$directory.path)
             $iterator = $directoryInfo.EnumerateFileSystemInfos().GetEnumerator()
-            while (-not $script:atLimit -and -not $script:credentialFailed) {
+            while (-not $script:credentialFailed) {
                 # Enumeration can fail on MoveNext as well as on creation.
                 if (-not $iterator.MoveNext()) { break }
                 $rootOpened = $true
@@ -134,11 +132,6 @@ function Invoke-ShareInventory {
                     $isDirectory = ($attributes -band [IO.FileAttributes]::Directory) -ne 0
                     $isReparsePoint = ($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
                     if (-not $isDirectory -or $IncludeFolders) {
-                        # Check before emission; never emit more than the configured cap.
-                        if ($script:entryCount -ge $MaxEntries) {
-                            $script:atLimit = $true
-                            break
-                        }
                         $size = $null
                         $extension = ''
                         $kind = 'folder'
@@ -160,7 +153,6 @@ function Invoke-ShareInventory {
                                 extension = $extension
                             }
                         }
-                        $script:entryCount++
                     }
                     # Junctions and symlinks must not escape the requested share tree.
                     if ($isDirectory -and -not $isReparsePoint -and [int]$directory.depth -lt $MaxDepth) {
@@ -191,9 +183,7 @@ function Invoke-ShareInventory {
         }
     }
 
-    if ($script:atLimit) {
-        Write-Event @{ type = 'share'; share = $Share; status = 'partial'; error = 'The configured entry limit was reached.' }
-    } elseif ($shareHadError -or $script:credentialFailed) {
+    if ($shareHadError -or $script:credentialFailed) {
         Write-Event @{ type = 'share'; share = $Share; status = 'partial'; error = 'Some metadata could not be read.' }
     } else {
         Write-Event @{ type = 'share'; share = $Share; status = 'complete' }
@@ -238,7 +228,6 @@ try {
 
     $options = Get-PropertyValue $request 'options' $null
     $maxDepth = Read-IntegerOption $options 'maxDepth' 8 0 32
-    $maxEntries = Read-IntegerOption $options 'maxEntries' 50000 100 250000
     $includeHiddenShares = Read-BooleanOption $options 'includeHiddenShares' $false
     $includeFolders = Read-BooleanOption $options 'includeFolders' $false
     $requestedShares = @(Get-PropertyValue $options 'shareNames' @())
@@ -337,12 +326,10 @@ public static class SmbAtlasNative
         Write-Event @{ type = 'warning'; message = 'No eligible disk shares were found. Enable hidden shares or supply share names if appropriate.' }
     }
     foreach ($share in $shares) {
-        if ($script:atLimit -or $script:credentialFailed) { break }
-        Invoke-ShareInventory -Share $share -UncHost $uncHost -MaxDepth $maxDepth -IncludeFolders $includeFolders -MaxEntries $maxEntries
+        if ($script:credentialFailed) { break }
+        Invoke-ShareInventory -Share $share -UncHost $uncHost -MaxDepth $maxDepth -IncludeFolders $includeFolders
     }
-    if ($script:atLimit) {
-        Write-Event @{ type = 'done'; status = 'partial'; error = 'The configured entry limit was reached; later entries and shares were not scanned.' }
-    } elseif ($script:credentialFailed) {
+    if ($script:credentialFailed) {
         Write-Event @{ type = 'done'; status = 'error'; error = 'The scan stopped after the server rejected the account or credentials.' }
     } elseif ($script:hadErrors) {
         Write-Event @{ type = 'done'; status = 'partial'; error = 'Some shares or directories could not be read.' }

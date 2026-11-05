@@ -144,10 +144,37 @@ test('scan validation handles domain credentials and rejects invalid options bef
     { username: '' }, { password: '' }, { username: 'LAB\\reader', domain: 'OTHER' },
     { username: 'reader@example.com', domain: 'LAB' }, { password: 'bad\npassword' },
     { options: [] }, { options: { concurrency: 17 } }, { options: { maxDepth: -1 } },
-    { options: { maxEntries: 99 } }, { options: { timeoutSeconds: 601 } },
+    { options: { timeoutSeconds: 601 } },
     { options: { includeHiddenShares: 'true' } }, { options: { shareNames: ['../Docs'] } },
     { options: { shareNames: ['Docs\\Subfolder'] } },
   ]) assert.throws(() => validateScan(payload(patch)), Error, JSON.stringify(patch));
+  assert.equal(Object.hasOwn(validateScan(payload({ options: { maxEntries: 50000 } })).options, 'maxEntries'), false);
+});
+
+test('scan API collects and exposes entries beyond 50,000 even when an old browser sends the removed limit', async t => {
+  let called = 0;
+  const { server, manager, auth } = await fixture(t, { runner: async ({ host, options, onEvent }) => {
+    called++;
+    assert.equal(Object.hasOwn(options, 'maxEntries'), false);
+    for (let index = 0; index < 25001; index++) onEvent({ type: 'entry', entry: {
+      name: `file-${index}.txt`, path: `\\\\${host}\\Docs\\file-${index}.txt`, share: 'Docs', kind: 'file',
+      size: 1, extension: '.txt', modified: null,
+    } });
+    return { status: 'complete' };
+  } });
+  const session = await request(server, '/api/session');
+  assert.equal(session.json.limits.maxEntries, null);
+  const started = await request(server, '/api/scans', { method: 'POST', headers: auth,
+    body: payload({ targets: '192.0.2.0/30', options: { maxEntries: 50000 } }) });
+  assert.equal(started.status, 202);
+  await manager.wait();
+  assert.equal(called, 2);
+  const page = await request(server, `/api/scans/${started.json.job.id}?offset=50000&limit=50`, { headers: auth });
+  assert.equal(page.json.job.status, 'completed');
+  assert.equal(page.json.job.truncated, false);
+  assert.equal(page.json.total, 50002);
+  assert.equal(page.json.entries.length, 2);
+  assert.equal(page.json.stats.filesCount, 50002);
 });
 
 test('oversized request bodies receive a bounded JSON error rather than a socket reset', async t => {

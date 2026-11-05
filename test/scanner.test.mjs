@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { setImmediate as nextTurn } from 'node:timers/promises';
 import { ScanManager } from '../lib/scanner.mjs';
 
-const defaults = { maxDepth: 8, concurrency: 2, timeoutSeconds: 90, maxEntries: 100,
+const defaults = { maxDepth: 8, concurrency: 2, timeoutSeconds: 90,
   includeHiddenShares: false, includeFolders: false, shareNames: [] };
 const identity = () => ({ username: 'audit-user-sensitive', domain: 'ORG-SENSITIVE', password: 'password-sensitive-!42' });
 const hosts = count => Array.from({ length: count }, (_, index) => `192.0.2.${index + 1}`);
@@ -101,26 +101,30 @@ test('the supported 16-worker configuration shares one cancellation signal safel
   }
 });
 
-test('enforces one inventory row cap across workers and preserves the collected prefix', async () => {
+test('collects beyond 50,000 entries and continues the host queue even with a legacy entry limit', async () => {
   const fake = controlledRunner();
   const manager = new ScanManager({ runner: fake.runner });
   manager.start(hosts(4), identity(), { ...defaults, maxEntries: 3 });
-  fake.calls[0].onEvent({ type: 'entry', entry: entry('one.txt', 1) });
-  fake.calls[1].onEvent({ type: 'entry', entry: entry('two.txt', 2) });
-  fake.calls[0].onEvent({ type: 'entry', entry: entry('three.txt', 3) });
-  fake.calls[1].onEvent({ type: 'entry', entry: entry('four.txt', 4) });
-  fake.calls[0].onEvent({ type: 'entry', entry: entry('late.txt', 5) });
+  for (let index = 0; index < 50001; index++) fake.calls[0].onEvent({ type: 'entry', entry: entry(`file-${index}.txt`, 1) });
+  fake.calls[1].onEvent({ type: 'entry', entry: entry('folder', 0, 'folder') });
+  assert.equal(fake.active, 2);
+  for (let index = 0; index < 4; index++) {
+    assert.ok(fake.calls[index], `host ${index + 1} was scheduled`);
+    fake.calls[index].complete();
+    await nextTurn();
+  }
   await manager.wait();
   const job = manager.snapshot();
-  assert.equal(job.status, 'partial');
-  assert.equal(job.truncated, true);
-  assert.equal(job.entriesCount, 3);
-  assert.equal(job.filesCount, 3);
-  assert.equal(job.totalBytes, 6);
-  assert.equal(fake.calls.length, 2);
-  assert.deepEqual(manager.entries.map(row => row.name), ['one.txt', 'two.txt', 'three.txt']);
-  assert.deepEqual(manager.entries.map(row => row.host), ['192.0.2.1', '192.0.2.2', '192.0.2.1']);
-  assert.match(job.errors[0].message, /3 row limit/);
+  assert.equal(job.status, 'completed');
+  assert.equal(job.truncated, false);
+  assert.equal(job.entriesCount, 50002);
+  assert.equal(job.filesCount, 50001);
+  assert.equal(job.foldersCount, 1);
+  assert.equal(job.totalBytes, 50001);
+  assert.equal(fake.calls.length, 4);
+  assert.equal(manager.entries.length, 50002);
+  assert.equal(manager.entries[50000].name, 'file-50000.txt');
+  assert.equal(job.errors.length, 0);
 });
 
 test('keeps partial file results, deduplicates shares, and redacts worker diagnostics', async () => {

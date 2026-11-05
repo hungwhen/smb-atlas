@@ -60,7 +60,6 @@
     $('progress-bar').style.width = `${percentage}%`; $('progress-percent').textContent = `${percentage}%`;
     $('progress-description').textContent = `${number(j.completedHosts)} of ${number(j.targetsCount)} hosts processed${j.status === 'cancelling' ? ' · waiting for active requests to finish' : ''}`;
     $('cancel-button').hidden = !isActive() || state.demo; $('cancel-button').disabled = j.status === 'cancelling'; $('cancel-button').textContent = j.status === 'cancelling' ? 'Stopping…' : 'Stop scan';
-    $('limit-notice').hidden = !j.truncated; $('limit-notice').textContent = 'The entry limit was reached. Narrow the scope or increase the entry limit to collect more results.';
   }
   function entryKind(entry) { const kind = String(entry.kind || entry.type || '').toLowerCase(); return ['directory', 'folder', 'dir'].includes(kind) || entry.isDirectory ? 'folder' : 'file'; }
   function entryName(entry) { return entry.name || String(entry.path || '').split(/[\\/]/).pop() || 'Unnamed entry'; }
@@ -234,7 +233,7 @@
   $('import-targets').addEventListener('click', () => $('target-file').click());
   $('scan-form').addEventListener('submit', async (event) => {
     event.preventDefault(); if (isActive() || !state.sessionReady) return; if (!$('scan-form').reportValidity()) return;
-    const payload = { targets: $('targets').value, username: $('username').value.trim(), password: $('password').value, domain: $('domain').value.trim(), options: { maxDepth: Number($('max-depth').value), concurrency: Number($('concurrency').value), timeoutSeconds: Number($('timeout').value), maxEntries: Number($('max-entries').value), includeHiddenShares: $('include-hidden').checked, includeFolders: $('include-folders').checked, shareNames: $('share-names').value.split(',').map((value) => value.trim()).filter(Boolean) } };
+    const payload = { targets: $('targets').value, username: $('username').value.trim(), password: $('password').value, domain: $('domain').value.trim(), options: { maxDepth: Number($('max-depth').value), concurrency: Number($('concurrency').value), timeoutSeconds: Number($('timeout').value), includeHiddenShares: $('include-hidden').checked, includeFolders: $('include-folders').checked, shareNames: $('share-names').value.split(',').map((value) => value.trim()).filter(Boolean) } };
     $('scan-button').disabled = true; $('scan-button').querySelector('span').textContent = 'Starting…'; notice('');
     try { const result = await api('/api/scans', { method: 'POST', body: JSON.stringify(payload) }); $('password').value = ''; $('password').type = 'password'; $('toggle-password').textContent = 'Show'; $('toggle-password').setAttribute('aria-pressed', 'false'); $('toggle-password').setAttribute('aria-label', 'Show password'); stopPolling(); state.generation++; state.demo = false; state.demoEntries = []; state.job = result.job; state.entries = []; state.stats = null; state.total = 0; state.hostOffset = 0; state.facets = { hosts: [], shares: [], extensions: [] }; resetQuery(); setTab('overview'); render(); await refresh(); }
     catch (error) { notice(errorMessage(error)); renderStats(); } finally { payload.password = ''; }
