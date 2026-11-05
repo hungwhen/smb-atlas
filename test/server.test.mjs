@@ -275,6 +275,43 @@ test('filetype facets and filters normalize extensions and expose extensionless 
   assert.equal(extensionless.json.stats.types[0].extension, '');
 });
 
+test('search, reset, live additions and stale pages stay consistent across inventory and charts', async t => {
+  let emit;
+  const { server, manager, auth } = await fixture(t, { runner: ({ onEvent, signal }) => new Promise(resolve => {
+    emit = onEvent;
+    signal.addEventListener('abort', () => resolve({ status: 'cancelled' }), { once: true });
+  }) });
+  const started = await request(server, '/api/scans', { method: 'POST', headers: auth, body: payload() });
+  const base = `/api/scans/${started.json.job.id}`;
+  const add = (name, extension, kind = 'file') => emit({ type: 'entry', entry: {
+    name, path: `\\\\192.0.2.1\\Docs\\${name}`, share: 'Docs', kind, extension, size: kind === 'file' ? 1 : null,
+  } });
+  add('report-without-suffix', '.PDF'); add('README', ''); add('Folder', '', 'folder');
+  for (const q of ['pdf', '.PDF', '*.pdf', '  *.PDF  ']) {
+    const filtered = await request(server, `${base}?${new URLSearchParams({ q })}`, { headers: auth });
+    assert.equal(filtered.json.total, 1, q);
+    assert.equal(filtered.json.stats.filesCount, 1, q);
+  }
+  const missing = await request(server, `${base}?q=does-not-exist&offset=5000`, { headers: auth });
+  assert.equal(missing.json.total, 0); assert.equal(missing.json.offset, 0);
+  const reset = await request(server, base, { headers: auth });
+  assert.equal(reset.json.total, 3); assert.equal(reset.json.stats.filesCount, 2);
+  add('second-report', 'pdf'); add('data.csv', '.csv');
+  const changed = await request(server, `${base}?q=pdf`, { headers: auth });
+  assert.equal(changed.json.total, 2, 'cached query must invalidate when new scan entries arrive');
+  assert.deepEqual(changed.json.facets.extensions, ['.csv', '.pdf', '__none__']);
+  const stalePage = await request(server, `${base}?extension=PDF&offset=5000&limit=1`, { headers: auth });
+  assert.equal(stalePage.json.offset, 1); assert.equal(stalePage.json.entries.length, 1);
+  const types = await request(server, `${base}?q=no+extension`, { headers: auth });
+  assert.equal(types.json.total, 1); assert.equal(types.json.entries[0].name, 'README');
+  const hostPage = await request(server, `${base}?view=hosts`, { headers: auth });
+  assert.equal(hostPage.json.inventoryIncluded, false);
+  assert.equal(hostPage.json.job.targetsCount, 1);
+  assert.equal(Object.hasOwn(hostPage.json, 'entries'), false);
+  const again = await request(server, base, { headers: auth });
+  assert.equal(again.json.total, 5); assert.equal(again.json.stats.filesCount, 4);
+});
+
 test('concurrent scan requests return a conflict even when both headers arrived before either body', async t => {
   const { server, manager, auth } = await fixture(t, { runner: ({ signal }) => new Promise(resolve => {
     signal.addEventListener('abort', () => resolve({ status: 'cancelled' }), { once: true });

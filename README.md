@@ -45,6 +45,8 @@ The **Overview** tab opens by default and presents interactive charts:
 
 Switch between **Storage** and **Files** to compare bytes or file counts. Select a file type, host, or share to open the matching inventory. Search and filters apply across every result page; scan health remains explicitly scoped to the whole scan. The host chart groups hosts beyond the largest eight as Other, and the share map combines shares beyond the largest six. Combined groups retain their full totals. Shares and hosts without matching files are excluded from the file charts.
 
+Use **All files** above the tabs to clear the search and every filter without clearing inventory. The active scope and matching count stay visible. A pending query is labeled while it loads; older responses cannot overwrite a newer search or reset. Search matches names, paths, hosts, shares, and file-type metadata. `pdf` or `.pdf` searches text and type metadata; `*.pdf` selects the exact extension; `no extension` finds files without a suffix. The same controls work in the sample. Host choices in the share map are searchable and paginated for large inventories.
+
 Charts update during a scan. They use locally generated SVG and readable legends, without downloaded chart libraries or online services. JSON exports include the host/share totals used by the charts. The share map describes the file inventory; it does not discover physical network routes.
 
 ## Sorting and file type statistics
@@ -83,5 +85,7 @@ PowerShell must be allowed to execute the included worker and compile its small 
 ## Verification and implementation
 
 Run `npm test` (or `node --test`) from this directory. Tests use synthetic data and injected workers; they do not scan your network or test a real organization's credentials. Browser demo verification does not establish compatibility with your specific SMB servers or policies.
+
+A complete JSON export from a finished scan can be restored for browsing after a restart by setting `SMB_ATLAS_RESTORE_FILE` to its local file path before running `node server.mjs`. Restore does not authenticate, contact hosts, or resume scanning. It preserves the completed inventory and host outcomes; new scans still use the normal Windows worker.
 
 The implementation uses Windows [LogonUser with outbound credentials](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-logonuserw) and [NetShareEnum at level 1](https://learn.microsoft.com/en-us/windows/win32/api/lmshare/nf-lmshare-netshareenum), plus read-only directory metadata enumeration. All source is included: `server.mjs` handles the local API, `lib/` handles targets and scan orchestration, `scripts/scan-host.ps1` handles SMB access, and `public/` contains the UI.

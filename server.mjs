@@ -84,6 +84,42 @@ export function csvCell(value) {
 
 export function createApp({ manager = new ScanManager(), platform = process.platform } = {}) {
   const token = randomBytes(32).toString('hex');
+  // Scan entries are append-only. Reuse sorted/filtered results between polls and
+  // page changes until another entry arrives, rather than sorting the full scan
+  // for every request and keystroke.
+  let inventoryVersion = '';
+  let cachedFacets = null;
+  const inventoryViews = new Map();
+  const inventoryView = params => {
+    const version = `${manager.job?.id || ''}:${manager.entries.length}`;
+    if (version !== inventoryVersion) {
+      inventoryVersion = version;
+      cachedFacets = null;
+      inventoryViews.clear();
+    }
+    const key = JSON.stringify(['q', 'host', 'share', 'extension', 'kind', 'sort', 'direction'].map(name => params.get(name) || ''));
+    let view = inventoryViews.get(key);
+    if (!view) {
+      view = { entries: queryEntries(manager.entries, params), stats: null };
+      inventoryViews.set(key, view);
+      if (inventoryViews.size > 8) inventoryViews.delete(inventoryViews.keys().next().value);
+    } else {
+      inventoryViews.delete(key);
+      inventoryViews.set(key, view);
+    }
+    return view;
+  };
+  const facets = () => {
+    if (!cachedFacets) {
+      const hosts = new Set(), shares = new Set(), extensions = new Set();
+      for (const entry of manager.entries) {
+        hosts.add(entry.host); shares.add(entry.share);
+        if (entry.kind !== 'folder') extensions.add(fileExtension(entry) || '__none__');
+      }
+      cachedFacets = { hosts: [...hosts].sort(), shares: [...shares].sort(), extensions: [...extensions].sort() };
+    }
+    return cachedFacets;
+  };
   const server = http.createServer(async (req, res) => {
     const port = server.address()?.port;
     const allowedHosts = new Set([`localhost:${port}`, `127.0.0.1:${port}`]);
@@ -131,15 +167,19 @@ export function createApp({ manager = new ScanManager(), platform = process.plat
             return json(200, { job: null });
           }
           if (req.method === 'GET') {
-            const entries = queryEntries(manager.entries, url.searchParams);
             const hostOffset = Math.max(0, Number.parseInt(url.searchParams.get('hostOffset') || '0', 10) || 0);
             const hostLimit = Math.min(200, Math.max(1, Number.parseInt(url.searchParams.get('hostLimit') || '200', 10) || 200));
             const job = manager.snapshot({ hostOffset, hostLimit });
+            if (!match[2] && ['hosts', 'errors'].includes(url.searchParams.get('view'))) {
+              return json(200, { job, inventoryIncluded: false });
+            }
+            const view = inventoryView(url.searchParams);
+            const entries = view.entries;
             if (match[2] === 'export') {
               const format = url.searchParams.get('format') || 'csv';
               if (!['csv', 'json'].includes(format)) throw fail(400, 'Export format must be csv or json.');
               res.setHeader('Content-Disposition', `attachment; filename="smb-atlas-${job.id}.${format}"`);
-              if (format === 'json') return json(200, { job: manager.snapshot({ hostLimit: Infinity }), total: entries.length, entries, stats: inventoryStats(entries) });
+              if (format === 'json') return json(200, { job: manager.snapshot({ hostLimit: Infinity }), total: entries.length, entries, stats: view.stats ??= inventoryStats(entries) });
               res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8' });
               const fields = ['host', 'share', 'path', 'name', 'kind', 'size', 'modified', 'extension'];
               // UTF-8 BOM makes Windows Excel preserve non-ASCII filenames.
@@ -161,14 +201,12 @@ export function createApp({ manager = new ScanManager(), platform = process.plat
               return res.end();
             }
             if (match[2]) throw fail(405, 'Method not allowed.');
-            const offset = Math.max(0, Number.parseInt(url.searchParams.get('offset') || '0', 10) || 0);
+            const requestedOffset = Math.max(0, Number.parseInt(url.searchParams.get('offset') || '0', 10) || 0);
             const limit = Math.min(200, Math.max(1, Number.parseInt(url.searchParams.get('limit') || '100', 10) || 100));
-            const facets = {
-              hosts: [...new Set(manager.entries.map(e => e.host))].sort(),
-              shares: [...new Set(manager.entries.map(e => e.share))].sort(),
-              extensions: [...new Set(manager.entries.filter(e => e.kind !== 'folder').map(e => fileExtension(e) || '__none__'))].sort(),
-            };
-            return json(200, { job, entries: entries.slice(offset, offset + limit), total: entries.length, facets, stats: inventoryStats(entries) });
+            const offset = Number.isSafeInteger(requestedOffset) && entries.length
+              ? Math.min(requestedOffset, Math.floor((entries.length - 1) / limit) * limit) : 0;
+            return json(200, { job, inventoryIncluded: true, entries: entries.slice(offset, offset + limit), offset,
+              total: entries.length, facets: facets(), stats: view.stats ??= inventoryStats(entries) });
           }
         }
         throw fail(404, 'API route not found.');
@@ -194,7 +232,11 @@ export function createApp({ manager = new ScanManager(), platform = process.plat
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const port = Number(process.env.PORT || 8787);
   if (!Number.isInteger(port) || port < 1 || port > 65535) { console.error('PORT must be an integer from 1 to 65535.'); process.exit(1); }
-  const { server, manager } = createApp();
+  const manager = new ScanManager();
+  if (process.env.SMB_ATLAS_RESTORE_FILE) {
+    manager.restoreInventory(JSON.parse(await readFile(process.env.SMB_ATLAS_RESTORE_FILE, 'utf8')));
+  }
+  const { server } = createApp({ manager });
   server.on('error', error => { console.error(error.code === 'EADDRINUSE' ? `Port ${port} is in use. Close the other app or set PORT.` : 'Could not start the local app.'); process.exitCode = 1; });
   server.listen(port, '127.0.0.1', () => {
     console.log(`SMB Atlas is running at http://127.0.0.1:${port}`);

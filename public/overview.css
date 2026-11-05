@@ -73,6 +73,11 @@
 .overview-host-picker { min-width: 180px; max-width: 260px; }
 .overview-host-picker label { display: flex; align-items: center; gap: 9px; margin: 0; color: #68716a; font-size: 11px; }
 .overview-host-picker select { min-height: 33px; padding: 6px 27px 6px 9px; font-size: 11px; border-color: #dfe5df; }
+.overview-host-search-label { margin-bottom: 7px !important; }
+.overview-host-picker input { min-width: 0; min-height: 33px; padding: 6px 9px; font-size: 11px; }
+.overview-map-paging { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 4px; color: #68716a; font-size: 10px; white-space: nowrap; }
+.overview-map-paging .overview-text-link { font-size: 10px; }
+.overview-map-paging .overview-text-link:disabled { opacity: .45; cursor: default; text-decoration: none; }
 .overview-map-scroll { width: 100%; max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: thin; }
 .overview-map-scroll:focus-visible { outline: 2px solid #315d49; outline-offset: -2px; }
 .overview-share-map { min-width: 620px; max-width: 1020px; margin: 0 auto; }

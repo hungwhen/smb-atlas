@@ -193,3 +193,29 @@ test('bounds diagnostics memory and records omitted errors', async () => {
   assert.equal(manager.snapshot().omittedErrors, 5);
   assert.equal(manager.snapshot().status, 'partial');
 });
+
+test('finished JSON inventories can be restored for browsing without starting workers', async () => {
+  const original = new ScanManager({ runner: async ({ onEvent }) => {
+    onEvent({ type: 'entry', entry: entry('saved.pdf', 42) });
+    return { status: 'complete' };
+  } });
+  original.start(hosts(2), identity(), { ...defaults });
+  await original.wait();
+  const saved = JSON.parse(JSON.stringify({ job: original.snapshot({ hostLimit: Infinity }), entries: original.entries }));
+  saved.job.password = 'must-not-be-restored';
+  saved.entries[0].credentials = 'must-not-be-restored';
+  let called = 0;
+  const restored = new ScanManager({ runner: async () => { called++; return { status: 'complete' }; } });
+  restored.restoreInventory(saved);
+  assert.equal(called, 0);
+  assert.equal(restored.busy, false);
+  assert.equal(restored.snapshot().entriesCount, 2);
+  assert.equal(restored.snapshot().hostStatusCounts.completed, 2);
+  assert.deepEqual(restored.entries.map(row => row.size), [42, 42]);
+  assert.equal(JSON.stringify(restored.snapshot()).includes('must-not-be-restored'), false);
+  assert.equal(JSON.stringify(restored.entries).includes('must-not-be-restored'), false);
+  assert.throws(() => restored.restoreInventory({ job: { ...saved.job, status: 'running' }, entries: saved.entries }), /finished scan/);
+  restored.start(hosts(1), identity(), { ...defaults });
+  await restored.wait();
+  assert.equal(called, 1, 'restoring must not replace the real scan runner');
+});

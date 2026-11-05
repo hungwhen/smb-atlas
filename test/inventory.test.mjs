@@ -35,6 +35,63 @@ test('missing extension metadata falls back to the filename or Windows path, whi
   assert.equal(fileExtension(file('trailing.', 1, undefined)), '');
 });
 
+test('search finds normalized file type metadata and supports wildcard extensions', () => {
+  const metadataOnly = file('opaque-id', 100, ' PDF ', { path: '\\\\192.0.2.1\\Docs\\opaque-id' });
+  const entries = [metadataOnly, file('other', 10, '.csv'), file('image.pdf.backup', 5, '.backup'),
+    file('folder', null, '.pdf', { kind: 'folder' })];
+  for (const q of ['pdf', '.pdf', ' PDF ']) {
+    assert.deepEqual(queryEntries(entries, new URLSearchParams({ q })).map(row => row.name),
+      ['image.pdf.backup', 'opaque-id']);
+  }
+  assert.deepEqual(queryEntries(entries, new URLSearchParams({ q: '*.PDF' })), [metadataOnly]);
+  for (const extension of ['pdf', '.PDF', '*.pdf', ' *.PDF ']) {
+    assert.deepEqual(queryEntries(entries, new URLSearchParams({ extension })), [metadataOnly]);
+  }
+});
+
+test('search keeps case-insensitive substring matching across paths, names, hosts, and shares', () => {
+  const row = file('Quarterly Summary', 10, '.pdf', { path: '\\\\192.0.2.12\\Finance Archive\\Fiscal 2026\\report' });
+  for (const q of ['summary', 'FISCAL 2026', '192.0.2.1', ' docs ', '  ']) {
+    assert.deepEqual(queryEntries([row], new URLSearchParams({ q })), [row]);
+  }
+  assert.deepEqual(queryEntries([{ kind: 'file' }], new URLSearchParams({ q: 'undefined' })), []);
+  assert.deepEqual(queryEntries([row], new URLSearchParams({ q: '[not a regex' })), []);
+});
+
+test('no extension search and filters include only extensionless files and respect other filters', () => {
+  const entries = [file('README', 1, ''), file('name.with.dot', 2, ''), file('.gitignore', 3, undefined),
+    file('Other README', 4, '', { host: '192.0.2.2' }), file('folder', null, '', { kind: 'folder' }),
+    file('no extension.pdf', 5, '.pdf')];
+  const expected = ['.gitignore', 'name.with.dot', 'README'];
+  for (const q of ['no extension', ' No Extension ', '__none__']) {
+    const rows = queryEntries(entries, new URLSearchParams({ q, host: '192.0.2.1', share: 'Docs' }));
+    assert.deepEqual(rows.map(row => row.name), expected);
+    assert.equal(inventoryStats(rows).totalBytes, 6);
+  }
+  for (const extension of ['__none__', 'no extension', '.']) {
+    assert.deepEqual(queryEntries(entries, new URLSearchParams({ extension, host: '192.0.2.1' })).map(row => row.name), expected);
+  }
+  assert.deepEqual(queryEntries(entries, new URLSearchParams({ q: 'no extension', kind: 'folder' })), []);
+  assert.deepEqual(queryEntries(entries, new URLSearchParams({ q: '*.pdf', extension: '__none__' })), []);
+});
+
+test('query statistics cover all matching rows with safe sizes before any pagination', () => {
+  const entries = Array.from({ length: 1025 }, (_, index) => file(`asset${index}`, index, index % 2 ? 'PDF' : '.csv',
+    { host: index % 3 ? '192.0.2.1' : '192.0.2.2' }));
+  entries.push(file('negative', -20, '.pdf'), file('invalid', 'invalid', '.pdf'), file('infinite', Infinity, '.pdf'));
+  const rows = queryEntries(entries, new URLSearchParams({ q: '*.pdf', host: '192.0.2.1', sort: 'size', direction: 'desc' }));
+  const expected = entries.filter(row => row.host === '192.0.2.1' && row.extension !== '.csv');
+  assert.equal(rows.length, expected.length);
+  assert.ok(rows.length > 200, 'A query must include matching rows beyond the largest result page.');
+  const stats = inventoryStats(rows);
+  assert.equal(stats.filesCount, expected.length);
+  assert.equal(stats.totalBytes, expected.reduce((sum, row) => sum + (typeof row.size === 'number' && Number.isFinite(row.size) ? Math.max(0, row.size) : 0), 0));
+  assert.equal(stats.typeCount, 1);
+  assert.equal(stats.types[0].extension, '.pdf');
+  assert.equal(stats.hostCount, 1);
+  assert.deepEqual(rows.slice(-3).map(row => row.name), ['negative', 'invalid', 'infinite']);
+});
+
 test('filetype statistics normalize equivalent extensions and exclude folders from every total', () => {
   const stats = inventoryStats([file('one.PDF', 100, '.PDF'), file('two.pdf', 300, 'pdf'),
     file('three.csv', 100, undefined), file('README', 0, ''),
@@ -101,13 +158,19 @@ test('host and share totals count host/share pairs, normalize sizes, and exclude
   assert.deepEqual(stats.hosts, [
     { host: '192.0.2.1', filesCount: 1, totalBytes: 200, sharesCount: 1,
       shares: [{ share: 'Docs', filesCount: 1, totalBytes: 200 }],
-      otherShares: { sharesCount: 0, filesCount: 0, totalBytes: 0 } },
+      otherShares: { sharesCount: 0, filesCount: 0, totalBytes: 0 },
+      sharesByFiles: [{ share: 'Docs', filesCount: 1, totalBytes: 200 }],
+      otherSharesByFiles: { sharesCount: 0, filesCount: 0, totalBytes: 0 } },
     { host: '192.0.2.2', filesCount: 3, totalBytes: 200, sharesCount: 2,
       shares: [{ share: 'Docs', filesCount: 2, totalBytes: 125 }, { share: 'Reports', filesCount: 1, totalBytes: 75 }],
-      otherShares: { sharesCount: 0, filesCount: 0, totalBytes: 0 } },
+      otherShares: { sharesCount: 0, filesCount: 0, totalBytes: 0 },
+      sharesByFiles: [{ share: 'Docs', filesCount: 2, totalBytes: 125 }, { share: 'Reports', filesCount: 1, totalBytes: 75 }],
+      otherSharesByFiles: { sharesCount: 0, filesCount: 0, totalBytes: 0 } },
     { host: '192.0.2.3', filesCount: 4, totalBytes: 0, sharesCount: 2,
       shares: [{ share: 'Invalid', filesCount: 2, totalBytes: 0 }, { share: 'Zero', filesCount: 2, totalBytes: 0 }],
-      otherShares: { sharesCount: 0, filesCount: 0, totalBytes: 0 } },
+      otherShares: { sharesCount: 0, filesCount: 0, totalBytes: 0 },
+      sharesByFiles: [{ share: 'Invalid', filesCount: 2, totalBytes: 0 }, { share: 'Zero', filesCount: 2, totalBytes: 0 }],
+      otherSharesByFiles: { sharesCount: 0, filesCount: 0, totalBytes: 0 } },
   ]);
 });
 
@@ -127,6 +190,20 @@ test('host share summaries retain the six largest groups and aggregate every omi
   assert.equal(host.sharesCount, host.shares.length + host.otherShares.sharesCount);
   assert.equal(host.filesCount, host.shares.reduce((sum, share) => sum + share.filesCount, host.otherShares.filesCount));
   assert.equal(host.totalBytes, host.shares.reduce((sum, share) => sum + share.totalBytes, host.otherShares.totalBytes));
+  assert.deepEqual(host.sharesByFiles.map(share => share.share), ['Share0', 'Share9', 'Share8', 'Share7', 'Share6', 'Share5']);
+  assert.deepEqual(host.otherSharesByFiles, { sharesCount: 4, filesCount: 4, totalBytes: 10 });
+  assert.equal(host.filesCount, host.sharesByFiles.reduce((sum, share) => sum + share.filesCount, host.otherSharesByFiles.filesCount));
+  assert.equal(host.totalBytes, host.sharesByFiles.reduce((sum, share) => sum + share.totalBytes, host.otherSharesByFiles.totalBytes));
+});
+
+test('share file-count ranking includes small-file shares omitted from the storage ranking', () => {
+  const entries = Array.from({ length: 6 }, (_, index) => file(`large${index}`, (index + 1) * GiB, '.vhdx', { share: `Large${index}` }));
+  entries.push(...Array.from({ length: 100 }, (_, index) => file(`tiny${index}`, 1, '.txt', { share: 'ManySmallFiles' })));
+  const [host] = inventoryStats(entries).hosts;
+  assert.deepEqual(host.shares.map(share => share.share), ['Large5', 'Large4', 'Large3', 'Large2', 'Large1', 'Large0']);
+  assert.deepEqual(host.otherShares, { sharesCount: 1, filesCount: 100, totalBytes: 100 });
+  assert.deepEqual(host.sharesByFiles.map(share => share.share), ['ManySmallFiles', 'Large5', 'Large4', 'Large3', 'Large2', 'Large1']);
+  assert.deepEqual(host.otherSharesByFiles, { sharesCount: 1, filesCount: 1, totalBytes: GiB });
 });
 
 test('host share summaries use natural name ordering for equal-byte groups and cap zero-byte lists', () => {
@@ -136,4 +213,6 @@ test('host share summaries use natural name ordering for equal-byte groups and c
   assert.deepEqual(host.otherShares, { sharesCount: 1, filesCount: 1, totalBytes: 0 });
   assert.equal(host.sharesCount, 7);
   assert.equal(host.filesCount, 7);
+  assert.deepEqual(host.sharesByFiles, host.shares);
+  assert.deepEqual(host.otherSharesByFiles, host.otherShares);
 });
